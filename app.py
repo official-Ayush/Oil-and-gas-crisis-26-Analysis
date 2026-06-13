@@ -86,8 +86,8 @@ with tab1:
 
     try:
         df_price = yf.download("BZ=F", start="2025-09-01",
-                               end="2026-05-10",
-                               progress=False, auto_adjust=True)
+                       end=datetime.now().strftime('%Y-%m-%d'),
+                       progress=False, auto_adjust=True)
         df_price = df_price[['Close']].reset_index()
         df_price.columns = ['Date', 'Price']
         df_price['Date'] = pd.to_datetime(df_price['Date'])
@@ -183,12 +183,14 @@ with tab1:
     st.plotly_chart(fig2, use_container_width=True)
 
     # Crisis timeline
+   # Crisis timeline — historical events (static) + auto-generated latest row
     st.subheader("📅 Crisis Timeline")
+
     timeline_data = {
         'Date': [
             'Feb 28, 2026', 'Mar 1, 2026', 'Mar 4, 2026',
             'Mar 7, 2026', 'Mar 22, 2026', 'Apr 6, 2026',
-            'Apr 13, 2026', 'May 5, 2026', 'May 5, 2026', 'May 10, 2026'
+            'Apr 13, 2026', 'May 5, 2026'
         ],
         'Event': [
             'US & Israel launch Operation Epic Fury on Iran',
@@ -198,17 +200,42 @@ with tab1:
             'OPEC agrees to increase output by 2M bpd',
             'Iran allows 7 Malaysian ships through strait',
             'US announces full naval blockade of Iranian ports',
-            'Trump announces Project Freedom',
-            'Brent crude surges to $114.44/bbl',
-            'Crisis continues — 71 days and counting'
+            'Trump announces Project Freedom'
         ],
         'Impact': [
             'Critical', 'Critical', 'Critical',
             'Moderate', 'Positive', 'Positive',
-            'Critical', 'Moderate', 'Critical', 'Critical'
+            'Critical', 'Moderate'
         ]
     }
     df_timeline = pd.DataFrame(timeline_data)
+
+    # ── Auto-generated "latest update" row ───────────────────
+    crisis_start = pd.Timestamp('2026-02-28')
+    days_since_start = (pd.Timestamp.now().normalize() - crisis_start).days
+
+    latest_price = float(df_price['Price'].iloc[-1])
+    pre_crisis_avg = float(df_price[df_price['Date'] < '2026-02-28']['Price'].mean())
+    pct_change = ((latest_price - pre_crisis_avg) / pre_crisis_avg) * 100
+
+    if pct_change > 40:
+        latest_impact = 'Critical'
+    elif pct_change > 15:
+        latest_impact = 'Moderate'
+    else:
+        latest_impact = 'Positive'
+
+    auto_row = pd.DataFrame({
+        'Date': [pd.Timestamp.now().strftime('%b %d, %Y')],
+        'Event': [
+            f'Live update: Brent crude at ${latest_price:.2f}/bbl '
+            f'({pct_change:+.1f}% vs pre-crisis avg) — Day {days_since_start} of crisis'
+        ],
+        'Impact': [latest_impact]
+    })
+
+    df_timeline = pd.concat([df_timeline, auto_row], ignore_index=True)
+
     color_map = {'Critical': '🔴', 'Moderate': '🟡', 'Positive': '🟢'}
     df_timeline['Status'] = df_timeline['Impact'].map(color_map)
     st.dataframe(
@@ -216,7 +243,7 @@ with tab1:
         use_container_width=True,
         hide_index=True
     )
-
+    st.caption("📌 The last row updates automatically every time the dashboard loads, based on live Brent crude data.")
 # ════════════════════════════════════════════════════
 # TAB 2 — PRICE FORECAST
 # ════════════════════════════════════════════════════
@@ -371,10 +398,38 @@ with tab3:
 # ════════════════════════════════════════════════════
 with tab4:
     st.subheader("📰 News Sentiment Analysis")
-    st.info("Analysing sentiment of real news headlines about the oil crisis using VADER NLP — Updated to May 10, 2026.")
+    st.info("Live headlines auto-fetched from Google News RSS, analysed using VADER NLP.")
 
-    df_news = pd.read_csv("data/news_headlines.csv")
-    df_news['date'] = pd.to_datetime(df_news['date'])
+    @st.cache_data(ttl=3600)  # refresh every 1 hour
+    def fetch_oil_news():
+        import feedparser
+        feed_url = "https://news.google.com/rss/search?q=oil+price+Strait+of+Hormuz+crisis&hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(feed_url)
+
+        headlines, dates, sources = [], [], []
+        for entry in feed.entries[:40]:
+            headlines.append(entry.title.rsplit(' - ', 1)[0])
+            sources.append(entry.title.rsplit(' - ', 1)[-1] if ' - ' in entry.title else 'Unknown')
+            try:
+                pub_date = pd.to_datetime(entry.published).tz_localize(None)
+            except:
+                pub_date = pd.Timestamp.now()
+            dates.append(pub_date)
+
+        return pd.DataFrame({'date': dates, 'headline': headlines, 'source': sources})
+
+    with st.spinner("Fetching latest news..."):
+        try:
+            df_news = fetch_oil_news()
+            if df_news.empty:
+                raise ValueError("No news found")
+            data_source = "🟢 Live (Google News RSS)"
+        except Exception as e:
+            df_news = pd.read_csv("data/news_headlines.csv")
+            df_news['date'] = pd.to_datetime(df_news['date'])
+            data_source = "🟡 Fallback (saved CSV)"
+
+    st.caption(f"Data source: {data_source} | Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
     sid = SentimentIntensityAnalyzer()
     df_news['scores']   = df_news['headline'].apply(lambda x: sid.polarity_scores(x))
@@ -403,12 +458,12 @@ with tab4:
         marker_color=colors_sentiment, name='Sentiment Score'))
     fig6.add_hline(y=0, line_dash='dash', line_color='white', opacity=0.5)
     fig6.update_layout(
-        title='Daily News Sentiment Score Over Time (Feb – May 2026)',
+        title='News Sentiment Score Over Time',
         xaxis_title='Date', yaxis_title='Compound Sentiment Score',
         height=400)
     st.plotly_chart(fig6, use_container_width=True)
 
-    # Pie
+    # Pie + monthly trend
     col1, col2 = st.columns(2)
     with col1:
         sentiment_counts = df_news['sentiment'].value_counts()
@@ -428,21 +483,20 @@ with tab4:
         st.plotly_chart(fig7, use_container_width=True)
 
     with col2:
-        # Monthly sentiment trend
-        df_news['month'] = df_news['date'].dt.strftime('%b %Y')
-        monthly_sentiment = df_news.groupby('month')['compound'].mean().reset_index()
-        monthly_sentiment.columns = ['Month', 'Avg Sentiment']
+        df_news['day'] = df_news['date'].dt.date
+        daily_sentiment = df_news.groupby('day')['compound'].mean().reset_index()
+        daily_sentiment.columns = ['Date', 'Avg Sentiment']
         fig8 = px.bar(
-            monthly_sentiment, x='Month', y='Avg Sentiment',
+            daily_sentiment, x='Date', y='Avg Sentiment',
             color='Avg Sentiment',
             color_continuous_scale=['#FF4500', '#FFD700', '#90EE90'],
-            title='Average Monthly Sentiment Score'
+            title='Average Daily Sentiment Score'
         )
         fig8.update_layout(height=350)
         st.plotly_chart(fig8, use_container_width=True)
 
     # Headlines table
-    st.subheader("📋 All Headlines with Sentiment")
+    st.subheader("📋 Latest Headlines with Sentiment")
     display_df = df_news[['date', 'headline', 'source', 'sentiment', 'compound']].copy()
     display_df['compound'] = display_df['compound'].round(3)
     display_df.columns = ['Date', 'Headline', 'Source', 'Sentiment', 'Score']
