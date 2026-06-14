@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import yfinance as yf
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
@@ -45,14 +44,15 @@ st.markdown('<p class="main-header">🛢️ Oil & Gas Crisis Dashboard 2026</p>'
             unsafe_allow_html=True)
 st.markdown(
     f'<p class="sub-header">Real-time analysis of the global oil crisis triggered '
-    f'by the Strait of Hormuz disruption — Live as of {datetime.now().strftime("%B %d, %Y")}</p>',
+    f'by the Strait of Hormuz disruption — Live as of '
+    f'{datetime.now().strftime("%B %d, %Y")}</p>',
     unsafe_allow_html=True
 )
 
 # ════════════════════════════════════════════════════
-# SHARED DATA FETCH (used across all tabs)
+# SHARED DATA FETCH
 # ════════════════════════════════════════════════════
-@st.cache_data(ttl=3600)  # refresh every 1 hour
+@st.cache_data(ttl=3600)
 def fetch_price_data():
     try:
         df = yf.download("BZ=F", start="2025-09-01",
@@ -67,7 +67,7 @@ def fetch_price_data():
     except Exception:
         pass
 
-    # ── Fallback: synthetic data if yFinance fails ──────────────
+    # Fallback synthetic data
     dates = pd.date_range(start='2025-09-01', end=datetime.now(), freq='B')
     np.random.seed(42)
     prices = [72.0]
@@ -89,72 +89,97 @@ def fetch_price_data():
 @st.cache_data(ttl=3600)
 def fetch_oil_news():
     import feedparser
-    feed_url = ("https://news.google.com/rss/search?q=oil+price+Strait+of+Hormuz+"
-                 "crisis&hl=en-US&gl=US&ceid=US:en")
-    feed = feedparser.parse(feed_url)
+
+    feed_urls = [
+        "https://news.google.com/rss/search?q=oil+price+Hormuz+crisis+2026&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=Strait+of+Hormuz+oil+2026&hl=en-US&gl=US&ceid=US:en",
+        "https://feeds.reuters.com/reuters/businessNews",
+        "https://feeds.bbci.co.uk/news/business/rss.xml",
+    ]
 
     headlines, dates, sources = [], [], []
-    for entry in feed.entries[:40]:
-        headlines.append(entry.title.rsplit(' - ', 1)[0])
-        sources.append(entry.title.rsplit(' - ', 1)[-1] if ' - ' in entry.title else 'Unknown')
+
+    for url in feed_urls:
         try:
-            pub_date = pd.to_datetime(entry.published).tz_localize(None)
+            feed = feedparser.parse(url)
+            if feed.entries:
+                for entry in feed.entries[:20]:
+                    title = entry.get('title', '')
+                    keywords = ['oil', 'crude', 'hormuz', 'energy',
+                                'iran', 'opec', 'fuel', 'gas', 'brent']
+                    if any(k in title.lower() for k in keywords):
+                        headlines.append(title.rsplit(' - ', 1)[0])
+                        sources.append(
+                            title.rsplit(' - ', 1)[-1]
+                            if ' - ' in title
+                            else entry.get('source', {}).get('title', 'Unknown')
+                        )
+                        try:
+                            pub_date = pd.to_datetime(
+                                entry.published).tz_localize(None)
+                        except Exception:
+                            pub_date = pd.Timestamp.now()
+                        dates.append(pub_date)
         except Exception:
-            pub_date = pd.Timestamp.now()
-        dates.append(pub_date)
+            continue
 
-    return pd.DataFrame({'date': dates, 'headline': headlines, 'source': sources})
+    if not headlines:
+        raise ValueError("No headlines fetched from any feed")
+
+    df = pd.DataFrame({'date': dates, 'headline': headlines, 'source': sources})
+    df = df.drop_duplicates(subset='headline')
+    df = df.sort_values('date', ascending=False).reset_index(drop=True)
+    return df
 
 
-# Fetch shared price data once, used everywhere
+# ── Fetch price data (shared across all tabs) ─────────────────
 df_price_global, is_live_data = fetch_price_data()
-df_price_global['MA7'] = df_price_global['Price'].rolling(7).mean()
+df_price_global['MA7']  = df_price_global['Price'].rolling(7).mean()
 df_price_global['MA30'] = df_price_global['Price'].rolling(30).mean()
 
 # ════════════════════════════════════════════════════
-# LIVE METRICS (auto-calculated)
+# LIVE METRICS (all auto-calculated)
 # ════════════════════════════════════════════════════
 st.subheader("📊 Live Market Overview")
 col1, col2, col3, col4 = st.columns(4)
 
 try:
-    brent = yf.Ticker("BZ=F")
-    brent_price = brent.history(period="2d")['Close']
-    current_price = round(float(brent_price.iloc[-1]), 2)
-    prev_price = round(float(brent_price.iloc[-2]), 2)
-    price_change = round(current_price - prev_price, 2)
-    price_pct = round((price_change / prev_price) * 100, 2)
+    brent       = yf.Ticker("BZ=F")
+    brent_hist  = brent.history(period="2d")['Close']
+    current_price = round(float(brent_hist.iloc[-1]), 2)
+    prev_price    = round(float(brent_hist.iloc[-2]), 2)
+    price_change  = round(current_price - prev_price, 2)
+    price_pct     = round((price_change / prev_price) * 100, 2)
 except Exception:
     current_price = float(df_price_global['Price'].iloc[-1])
-    price_change = 0.0
-    price_pct = 0.0
+    price_change  = 0.0
+    price_pct     = 0.0
 
-# Crisis start price — actual value on Feb 28, 2026 (or closest available)
 try:
     crisis_start_price = float(
         df_price_global.iloc[
-            (df_price_global['Date'] - pd.Timestamp('2026-02-28')).abs().argsort()[:1]
+            (df_price_global['Date'] - pd.Timestamp('2026-02-28'))
+            .abs().argsort()[:1]
         ]['Price'].iloc[0]
     )
 except Exception:
     crisis_start_price = 72.50
 
-# Peak price since crisis began
 try:
     post_crisis_df = df_price_global[df_price_global['Date'] >= '2026-02-28']
     peak_price = float(post_crisis_df['Price'].max())
-    peak_pct = ((peak_price - crisis_start_price) / crisis_start_price) * 100
+    peak_pct   = ((peak_price - crisis_start_price) / crisis_start_price) * 100
 except Exception:
     peak_price, peak_pct = 119.80, 65.0
 
-# Days since crisis started
 crisis_days = (pd.Timestamp.now().normalize() - pd.Timestamp('2026-02-28')).days
 
-col1.metric("Brent Crude ($/bbl)", f"${current_price:.2f}",
+col1.metric("Brent Crude ($/bbl)",  f"${current_price:.2f}",
             f"{price_change:+.2f} ({price_pct:+.2f}%)")
-col2.metric("Crisis Start Price", f"${crisis_start_price:.2f}", "Feb 28, 2026")
-col3.metric("Peak Price", f"${peak_price:.2f}", f"+{peak_pct:.0f}% from start")
-col4.metric("Hormuz Disruption", f"{crisis_days} Days", "Still ongoing")
+col2.metric("Crisis Start Price",   f"${crisis_start_price:.2f}", "Feb 28, 2026")
+col3.metric("Peak Price",           f"${peak_price:.2f}",
+            f"+{peak_pct:.0f}% from start")
+col4.metric("Hormuz Disruption",    f"{crisis_days} Days", "Still ongoing")
 
 st.divider()
 
@@ -179,6 +204,7 @@ with tab1:
     else:
         st.caption("🟡 Using simulated data (yFinance temporarily unavailable)")
 
+    # Price chart
     fig1 = go.Figure()
     fig1.add_trace(go.Scatter(
         x=df_price['Date'], y=df_price['Price'],
@@ -190,17 +216,17 @@ with tab1:
         x=df_price['Date'], y=df_price['MA30'],
         name='30-Day MA', line=dict(color='#00CED1', width=1.5, dash='dash')))
 
-    # Crisis event markers (fixed historical record)
     events = [
-        ('2026-02-28', 'US-Israel strikes Iran', '#FF0000'),
-        ('2026-03-01', 'Hormuz closure', '#FF4500'),
-        ('2026-03-07', 'US reserve release', '#FFD700'),
-        ('2026-03-22', 'OPEC output increase', '#90EE90'),
-        ('2026-04-13', 'US blockades Iran ports', '#FF4500'),
-        ('2026-05-05', 'Project Freedom', '#FFA500'),
+        ('2026-02-28', 'US-Israel strikes Iran',    '#FF0000'),
+        ('2026-03-04', 'Hormuz declared closed',    '#FF4500'),
+        ('2026-03-07', 'US reserve release',        '#FFD700'),
+        ('2026-03-22', 'OPEC output increase',      '#90EE90'),
+        ('2026-04-13', 'US blockades Iran ports',   '#FF4500'),
+        ('2026-05-05', 'Project Freedom',           '#FFA500'),
+        ('2026-05-12', 'Blockade lifted',           '#90EE90'),
     ]
 
-    label_offsets = [0.92, 0.82, 0.72, 0.62, 0.52, 0.42]
+    label_offsets = [0.92, 0.82, 0.72, 0.62, 0.52, 0.42, 0.32]
     for i, (date_str, label, color) in enumerate(events):
         event_date = pd.Timestamp(date_str)
         if event_date <= df_price['Date'].max():
@@ -227,32 +253,33 @@ with tab1:
 
     # Stats
     col1, col2, col3 = st.columns(3)
-    pre = df_price[df_price['Date'] < '2026-02-28']['Price']
+    pre  = df_price[df_price['Date'] < '2026-02-28']['Price']
     post = df_price[df_price['Date'] >= '2026-02-28']['Price']
-    col1.metric("Pre-Crisis Avg", f"${pre.mean():.2f}")
+    col1.metric("Pre-Crisis Avg",  f"${pre.mean():.2f}")
     col2.metric("Post-Crisis Avg", f"${post.mean():.2f}")
-    col3.metric("Max Price Spike",
-                f"${df_price['Price'].max():.2f}",
+    col3.metric("Max Price Spike", f"${df_price['Price'].max():.2f}",
                 f"+{df_price['Price'].max() - pre.mean():.2f}")
 
-    # Volatility
+    # Volatility chart
     st.subheader("📊 Price Volatility Analysis")
     df_price['Daily_Change'] = df_price['Price'].pct_change() * 100
     fig2 = px.bar(df_price.tail(60), x='Date', y='Daily_Change',
-                   color='Daily_Change',
-                   color_continuous_scale=['#00CED1', '#FFD700', '#FF6B35'],
-                   title="Daily % Price Change (Last 60 Trading Days)")
+                  color='Daily_Change',
+                  color_continuous_scale=['#00CED1', '#FFD700', '#FF6B35'],
+                  title="Daily % Price Change (Last 60 Trading Days)")
     fig2.update_layout(height=350)
     st.plotly_chart(fig2, use_container_width=True)
 
-    # ── Crisis Timeline — historical (static) + auto-generated latest row ──
+    # Crisis Timeline
     st.subheader("📅 Crisis Timeline")
 
     timeline_data = {
         'Date': [
             'Feb 28, 2026', 'Mar 1, 2026', 'Mar 4, 2026',
             'Mar 7, 2026', 'Mar 22, 2026', 'Apr 6, 2026',
-            'Apr 13, 2026', 'May 5, 2026'
+            'Apr 13, 2026', 'Apr 17, 2026', 'Apr 19, 2026',
+            'Apr 21, 2026', 'May 5, 2026',  'May 12, 2026',
+            'May 29, 2026', 'Jun 3, 2026'
         ],
         'Event': [
             'US & Israel launch Operation Epic Fury on Iran',
@@ -262,54 +289,60 @@ with tab1:
             'OPEC agrees to increase output by 2M bpd',
             'Iran allows 7 Malaysian ships through strait',
             'US announces full naval blockade of Iranian ports',
-            'Trump announces Project Freedom'
+            'Iran declares Hormuz open — IRGC reverses next day',
+            'US seizes Iranian-flagged cargo vessel',
+            'IMO reports 20,000 mariners stranded on 2,000 ships',
+            'Brent surges to $114.44 — Project Freedom announced',
+            'US naval blockade lifted after 46 days',
+            'US naval blockade officially ends',
+            'Tankers still anchored in Hormuz — crisis ongoing',
         ],
         'Impact': [
             'Critical', 'Critical', 'Critical',
             'Moderate', 'Positive', 'Positive',
-            'Critical', 'Moderate'
+            'Critical', 'Moderate', 'Critical',
+            'Critical', 'Critical', 'Positive',
+            'Positive', 'Moderate',
         ]
     }
     df_timeline = pd.DataFrame(timeline_data)
 
-    # Auto-generated "latest update" row based on live price data
-    latest_price = float(df_price['Price'].iloc[-1])
+    # Auto-generated latest row
+    latest_price   = float(df_price['Price'].iloc[-1])
     pre_crisis_avg = float(pre.mean())
-    pct_change = ((latest_price - pre_crisis_avg) / pre_crisis_avg) * 100
+    pct_change_now = ((latest_price - pre_crisis_avg) / pre_crisis_avg) * 100
 
-    if pct_change > 40:
+    if pct_change_now > 40:
         latest_impact = 'Critical'
-    elif pct_change > 15:
+    elif pct_change_now > 15:
         latest_impact = 'Moderate'
     else:
         latest_impact = 'Positive'
 
     auto_row = pd.DataFrame({
-        'Date': [pd.Timestamp.now().strftime('%b %d, %Y')],
-        'Event': [
-            f'Live update: Brent crude at ${latest_price:.2f}/bbl '
-            f'({pct_change:+.1f}% vs pre-crisis avg) — Day {crisis_days} of crisis'
-        ],
+        'Date':   [pd.Timestamp.now().strftime('%b %d, %Y')],
+        'Event':  [f'Live update: Brent crude at ${latest_price:.2f}/bbl '
+                   f'({pct_change_now:+.1f}% vs pre-crisis avg) '
+                   f'— Day {crisis_days} of crisis'],
         'Impact': [latest_impact]
     })
 
     df_timeline = pd.concat([df_timeline, auto_row], ignore_index=True)
-
     color_map = {'Critical': '🔴', 'Moderate': '🟡', 'Positive': '🟢'}
     df_timeline['Status'] = df_timeline['Impact'].map(color_map)
+
     st.dataframe(
         df_timeline[['Date', 'Status', 'Event']],
         use_container_width=True,
         hide_index=True
     )
-    st.caption("📌 The last row updates automatically every time the dashboard loads, "
-               "based on live Brent crude data.")
+    st.caption("📌 Last row updates automatically on every load based on live Brent crude data.")
 
 # ════════════════════════════════════════════════════
 # TAB 2 — PRICE FORECAST
 # ════════════════════════════════════════════════════
 with tab2:
-    st.subheader("🔮 Oil Price Forecast (Next 30 Days)")
+    st.subheader("🔮 Oil Price Forecast")
     st.info("Using Linear Regression on post-crisis price trends to forecast future prices.")
 
     forecast_days = st.slider("Forecast horizon (days)", 7, 60, 30)
@@ -323,34 +356,26 @@ with tab2:
     df_model['Days'] = (df_model['Date'] - df_model['Date'].min()).dt.days
 
     post_crisis = df_model[df_model['Date'] >= '2026-02-28']
-    if len(post_crisis) > 5:
-        X = post_crisis[['Days']].values
-        y = post_crisis['Price'].values
-    else:
-        X = df_model[['Days']].values
-        y = df_model['Price'].values
+    X = post_crisis[['Days']].values if len(post_crisis) > 5 else df_model[['Days']].values
+    y = post_crisis['Price'].values  if len(post_crisis) > 5 else df_model['Price'].values
 
     model_lr = LinearRegression()
     model_lr.fit(X, y)
 
-    last_day = int(df_model['Days'].max())
-    last_date = df_model['Date'].max()
+    last_day   = int(df_model['Days'].max())
+    last_date  = df_model['Date'].max()
     last_price = float(df_price_global['Price'].iloc[-1])
-    future_days = np.arange(last_day + 1, last_day + forecast_days + 1)
     future_dates = [last_date + timedelta(days=i) for i in range(1, forecast_days + 1)]
 
     if scenario == "Optimistic (Crisis Resolves)":
         final_forecast = np.linspace(last_price, 72, forecast_days)
-        color = '#00CED1'
-        band = 6
+        color, band = '#00CED1', 6
     elif scenario == "Pessimistic (Crisis Worsens — $200/bbl)":
         final_forecast = np.linspace(last_price, 175, forecast_days)
-        color = '#FF4500'
-        band = 10
+        color, band = '#FF4500', 10
     else:
         final_forecast = np.linspace(last_price, 95, forecast_days)
-        color = '#FFD700'
-        band = 8
+        color, band = '#FFD700', 8
 
     final_forecast = np.clip(final_forecast, 50, 200)
 
@@ -376,16 +401,16 @@ with tab2:
 
     col1, col2, col3 = st.columns(3)
     change = final_forecast[-1] - last_price
-    col1.metric("Current Price", f"${last_price:.2f}")
-    col2.metric("Forecast End Price", f"${final_forecast[-1]:.2f}")
-    col3.metric("Expected Change", f"${change:.2f}",
+    col1.metric("Current Price",       f"${last_price:.2f}")
+    col2.metric("Forecast End Price",  f"${final_forecast[-1]:.2f}")
+    col3.metric("Expected Change",     f"${change:.2f}",
                 "🟢 Easing" if change < 0 else "🔴 Rising")
 
     st.info("""
     **Scenario Assumptions:**
-    - 🟢 **Optimistic:** US-Iran ceasefire holds, Hormuz reopens within weeks, prices return to pre-crisis levels
-    - 🟡 **Base Case:** Partial reopening via Project Freedom, gradual price easing to ~$95/bbl
-    - 🔴 **Pessimistic:** Project Freedom fails, crisis escalates, analysts' $200/bbl target approached
+    - 🟢 **Optimistic:** Ceasefire holds, Hormuz reopens, prices return to pre-crisis ~$72
+    - 🟡 **Base Case:** Phased reopening via Project Freedom, gradual easing to ~$95
+    - 🔴 **Pessimistic:** Crisis escalates further, analysts $200/bbl target approached
     """)
 
 # ════════════════════════════════════════════════════
@@ -405,15 +430,11 @@ with tab3:
 
     fig4 = px.choropleth(
         df_filtered,
-        locations='country',
-        locationmode='country names',
-        color='impact_score',
-        hover_name='country',
-        hover_data={
-            'daily_import_mbd': True,
-            'price_increase_pct': True,
-            'risk_level': True
-        },
+        locations='country', locationmode='country names',
+        color='impact_score', hover_name='country',
+        hover_data={'daily_import_mbd': True,
+                    'price_increase_pct': True,
+                    'risk_level': True},
         color_continuous_scale=['#90EE90', '#FFD700', '#FF6B35', '#FF0000'],
         title='Oil Crisis Impact Score by Country (0–100)',
         labels={'impact_score': 'Impact Score'}
@@ -423,13 +444,11 @@ with tab3:
 
     fig5 = px.bar(
         df_filtered.sort_values('impact_score', ascending=True),
-        x='impact_score', y='country',
-        orientation='h', color='risk_level',
+        x='impact_score', y='country', orientation='h',
+        color='risk_level',
         color_discrete_map={
-            'Critical': '#FF0000',
-            'High': '#FF6B35',
-            'Medium': '#FFD700',
-            'Low': '#90EE90'
+            'Critical': '#FF0000', 'High': '#FF6B35',
+            'Medium':   '#FFD700', 'Low':  '#90EE90'
         },
         title='Countries Ranked by Impact Score',
         labels={'impact_score': 'Impact Score', 'country': 'Country'}
@@ -441,20 +460,21 @@ with tab3:
     st.dataframe(
         df_filtered.sort_values('impact_score', ascending=False)
         .rename(columns={
-            'country': 'Country',
-            'impact_score': 'Impact Score',
-            'daily_import_mbd': 'Daily Imports (MBD)',
+            'country':            'Country',
+            'impact_score':       'Impact Score',
+            'daily_import_mbd':   'Daily Imports (MBD)',
             'price_increase_pct': 'Price Increase %',
-            'risk_level': 'Risk Level'
+            'risk_level':         'Risk Level'
         }),
         use_container_width=True, hide_index=True
     )
 
     st.info("""
-    **Key Insight:** About 170 million barrels of crude oil, jet fuel and diesel
-    remain trapped on tankers in the Gulf. Asian nations — China, Japan,
-    India and South Korea — face the most critical supply shortages as the
-    majority of Hormuz shipments are destined for Asian markets.
+    **Key Insight (Jun 2026):**
+    Cumulative oil supply losses have reached ~1 billion barrels in 3 months —
+    equivalent to 2.5× the US Strategic Petroleum Reserve. Asian nations face
+    the most critical shortages as the majority of Hormuz shipments are destined
+    for Asian markets.
     """)
 
 # ════════════════════════════════════════════════════
@@ -462,25 +482,31 @@ with tab3:
 # ════════════════════════════════════════════════════
 with tab4:
     st.subheader("📰 News Sentiment Analysis")
-    st.info("Live headlines auto-fetched from Google News RSS, analysed using VADER NLP.")
+    st.info("Live headlines auto-fetched from RSS feeds, analysed using VADER NLP. "
+            "Falls back to saved CSV if RSS is unavailable.")
 
-    with st.spinner("Fetching latest news..."):
+    with st.spinner("🔍 Fetching latest oil & gas news..."):
         try:
             df_news = fetch_oil_news()
             if df_news.empty:
-                raise ValueError("No news found")
-            data_source = "🟢 Live (Google News RSS)"
+                raise ValueError("Empty dataframe")
+            data_source = f"🟢 Live RSS Feed ({len(df_news)} headlines fetched)"
         except Exception:
             df_news = pd.read_csv("data/news_headlines.csv")
             df_news['date'] = pd.to_datetime(df_news['date'])
-            data_source = "🟡 Fallback (saved CSV)"
+            data_source = f"🟡 Fallback CSV ({len(df_news)} headlines) — RSS unavailable"
 
-    st.caption(f"Data source: {data_source} | Last refreshed: "
-               f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    st.caption(f"Data source: {data_source} | "
+               f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
+    if st.button("🔄 Refresh News Now"):
+        st.cache_data.clear()
+        st.rerun()
+
+    # Sentiment analysis
     sid = SentimentIntensityAnalyzer()
-    df_news['scores'] = df_news['headline'].apply(lambda x: sid.polarity_scores(x))
-    df_news['compound'] = df_news['scores'].apply(lambda x: x['compound'])
+    df_news['scores']    = df_news['headline'].apply(lambda x: sid.polarity_scores(str(x)))
+    df_news['compound']  = df_news['scores'].apply(lambda x: x['compound'])
     df_news['sentiment'] = df_news['compound'].apply(
         lambda x: '🟢 Positive' if x > 0.05
         else ('🔴 Negative' if x < -0.05 else '🟡 Neutral'))
@@ -488,21 +514,20 @@ with tab4:
     # Metrics
     col1, col2, col3, col4 = st.columns(4)
     neg = len(df_news[df_news['compound'] < -0.05])
-    pos = len(df_news[df_news['compound'] > 0.05])
+    pos = len(df_news[df_news['compound'] >  0.05])
     neu = len(df_news) - neg - pos
-    col1.metric("🔴 Negative", neg)
-    col2.metric("🟡 Neutral", neu)
-    col3.metric("🟢 Positive", pos)
+    col1.metric("🔴 Negative",        neg)
+    col2.metric("🟡 Neutral",         neu)
+    col3.metric("🟢 Positive",        pos)
     col4.metric("📰 Total Headlines", len(df_news))
 
     # Sentiment over time
     fig6 = go.Figure()
-    colors_sentiment = df_news['compound'].apply(
-        lambda x: '#FF4500' if x < -0.05
-        else ('#90EE90' if x > 0.05 else '#FFD700'))
+    colors_s = df_news['compound'].apply(
+        lambda x: '#FF4500' if x < -0.05 else ('#90EE90' if x > 0.05 else '#FFD700'))
     fig6.add_trace(go.Bar(
         x=df_news['date'], y=df_news['compound'],
-        marker_color=colors_sentiment, name='Sentiment Score'))
+        marker_color=colors_s, name='Sentiment Score'))
     fig6.add_hline(y=0, line_dash='dash', line_color='white', opacity=0.5)
     fig6.update_layout(
         title='News Sentiment Score Over Time',
@@ -520,7 +545,7 @@ with tab4:
             color=sentiment_counts.index,
             color_discrete_map={
                 '🔴 Negative': '#FF4500',
-                '🟡 Neutral': '#FFD700',
+                '🟡 Neutral':  '#FFD700',
                 '🟢 Positive': '#90EE90'
             },
             title='Overall Sentiment Distribution',
@@ -530,11 +555,11 @@ with tab4:
         st.plotly_chart(fig7, use_container_width=True)
 
     with col2:
-        df_news['day'] = df_news['date'].dt.date
-        daily_sentiment = df_news.groupby('day')['compound'].mean().reset_index()
-        daily_sentiment.columns = ['Date', 'Avg Sentiment']
+        df_news['day'] = pd.to_datetime(df_news['date']).dt.date
+        daily_sent = df_news.groupby('day')['compound'].mean().reset_index()
+        daily_sent.columns = ['Date', 'Avg Sentiment']
         fig8 = px.bar(
-            daily_sentiment, x='Date', y='Avg Sentiment',
+            daily_sent, x='Date', y='Avg Sentiment',
             color='Avg Sentiment',
             color_continuous_scale=['#FF4500', '#FFD700', '#90EE90'],
             title='Average Daily Sentiment Score'
@@ -542,11 +567,12 @@ with tab4:
         fig8.update_layout(height=350)
         st.plotly_chart(fig8, use_container_width=True)
 
-    # Headlines table
+    # Headlines table — clean date format
     st.subheader("📋 Latest Headlines with Sentiment")
     display_df = df_news[['date', 'headline', 'source', 'sentiment', 'compound']].copy()
+    display_df['date']     = pd.to_datetime(display_df['date']).dt.strftime('%Y-%m-%d')
     display_df['compound'] = display_df['compound'].round(3)
-    display_df.columns = ['Date', 'Headline', 'Source', 'Sentiment', 'Score']
+    display_df.columns     = ['Date', 'Headline', 'Source', 'Sentiment', 'Score']
     st.dataframe(
         display_df.sort_values('Date', ascending=False),
         use_container_width=True, hide_index=True
@@ -557,6 +583,6 @@ st.divider()
 st.markdown(f"""
 <div style='text-align:center;color:#888;font-size:0.85rem'>
     🛢️ Oil & Gas Crisis Dashboard 2026 | Built with Python, Streamlit & Plotly<br>
-    Live price data: yFinance | Live news: Google News RSS | Auto-updated as of {datetime.now().strftime('%Y-%m-%d %H:%M')}
+    Live price: yFinance | Live news: RSS Feeds | Auto-updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 </div>
-""", unsafe_allow_html=True)
+""", unsafe_allow_html=True)    
